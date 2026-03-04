@@ -1,122 +1,160 @@
-// Pino que recebe o sinal digital do sensor de vazão
-#define BUTTON_PIN 32 
+// ============================================================================
+// Configurações de Hardware e Bibliotecas
+// ============================================================================
 
-// Biblioteca para conectar ao Wi-Fi
-#include <WiFi.h>
+#define BUTTON_PIN 32 // Pino GPIO do ESP32 que recebe o sinal digital do sensor de vazão
 
-//Biblioteca para gerenciar a conexão com servidor MQTT
-#include <PubSubClient.h>
+#include <WiFi.h>           // Gerencia a conexão Wi-Fi do microcontrolador
+#include <PubSubClient.h>   // Cliente MQTT para publicação e subscrição de tópicos
+#include <ArduinoJson.h>    // Facilita a estruturação do payload no formato JSON
+#include "secrets.h"        // Arquivo local com credenciais sensíveis (IMPORTANTE: deve estar no .gitignore)
 
-//Biblioteca para estruturar a mensagem enviada como JSON
-#include <ArduinoJson.h>
+// ============================================================================
+// Variáveis Globais e Configurações de Rede
+// ============================================================================
 
-//Arquivo para armazenar informações sensiveis
-#include "secrets.h"
+const char* residencia = "105"; // Identificador único da residência para este dispositivo
 
-//Informação da residencia
-const char* residencia = "105";
-
-//Informações do Wi-Fi
+// Credenciais importadas do secrets.h
 const char* ssid = SECRET_SSID;
 const char* password = SECRET_PASS;
-
-//Informações de servidor MQTT
 const char* mqtt_server = MQTT_SERVER;
-const int mqtt_port = MQTT_PORT;
+const int   mqtt_port = MQTT_PORT;
 const char* mqtt_user = MQTT_USER;
 const char* mqtt_pass = MQTT_PASS;
 
-WiFiClient espClient;
-PubSubClient client(espClient);
+// Instâncias dos clientes de rede
+WiFiClient espClient;           // Lida com a camada TCP/IP
+PubSubClient client(espClient); // Lida com o protocolo MQTT sobre o TCP/IP
 
+// Documento JSON alocado dinamicamente para montar o payload de envio
 JsonDocument doc;
 
-int state = LOW;
+// ============================================================================
+// Variáveis de Interrupção (Volatile)
+// ============================================================================
+// O modificador 'volatile' avisa o compilador para carregar a variável direto da RAM 
+// a cada leitura, pois ela pode ser alterada a qualquer momento pela rotina de interrupção (ISR).
 
 volatile int water = 0; 
-
 volatile unsigned long lastInterruptTime = 0;
-const unsigned long debounceDelay = 200; 
+const unsigned long debounceDelay = 200; // Tempo em ms para ignorar ruídos elétricos do sensor (debounce)
 
+// ============================================================================
+// Funções Auxiliares
+// ============================================================================
 
+// Inicializa e aguarda a conexão com a rede Wi-Fi
 void setup_wifi() {
   delay(10);
-  Serial.println();
-  Serial.print("Conectando-se ao Wi-FI");
+  Serial.println("\nConectando-se ao Wi-Fi...");
 
   WiFi.begin(ssid, password);
+  
+  // Trava a execução enquanto não conectar
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nWiFi conectado");
+  
+  Serial.println("\nWiFi conectado com sucesso!");
   Serial.print("Endereço IP: ");
   Serial.println(WiFi.localIP());
 }
 
+// Mantém ou recupera a conexão com o broker MQTT
 void reconnect() {
   while (!client.connected()) {
-    Serial.print("Tentando conexão MQTT...");
+    Serial.print("Tentando conexão com Broker MQTT...");
+    
+    // Gera um ID de cliente único para evitar conflitos no Broker
     String clientId = "ESP32Client-";
     clientId += residencia;
+    
+    // Tenta conectar usando as credenciais
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
-      Serial.println("conectado!");
+      Serial.println("Conectado!");
+      // Publica uma mensagem de status informando que o dispositivo "acordou"
       client.publish("esp32/status", "online");
     } else {
-      Serial.print("falhou, rc=");
+      Serial.print("Falhou. Código de erro (rc) = ");
       Serial.print(client.state());
-      Serial.println(" tentando novamente em 5 segundos");
+      Serial.println(". Tentando novamente em 5 segundos...");
       delay(5000);
     }
   }
 }
 
+// ============================================================================
+// Rotina de Serviço de Interrupção (ISR)
+// ============================================================================
+// IRAM_ATTR força a função a ficar na RAM interna do ESP32 (mais rápida),
+// evitando atrasos causados pela leitura da memória Flash.
 void IRAM_ATTR flow() {
   unsigned long interruptTime = millis();
   
+  // Filtro de Debounce: Só contabiliza o pulso se passou o tempo mínimo desde o último
   if (interruptTime - lastInterruptTime > debounceDelay) {
     water++;
     lastInterruptTime = interruptTime;
   }
 }
 
+// ============================================================================
+// Setup (Executado uma vez na inicialização)
+// ============================================================================
 void setup() {
   Serial.begin(115200);
 
+  // Pré-configura os campos fixos do JSON para economizar processamento no loop
   doc["residencia"] = residencia;
   doc["pulso"] = 0;
   
+  // Configura o pino com resistor de pull-up interno (evita flutuação de sinal)
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   
+  // Atrela a função 'flow' ao pino. O gatilho 'FALLING' aciona a interrupção 
+  // quando o sinal vai de HIGH para LOW (comum em botões/sensores com pull-up).
   attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), flow, FALLING);
   
   setup_wifi();
-
   client.setServer(mqtt_server, mqtt_port);
 }
 
+// ============================================================================
+// Loop Principal
+// ============================================================================
 void loop() {
+  // Garante que o MQTT continue conectado
   if (!client.connected()) {
     reconnect();
   }
+  // Mantém os processos em background do cliente MQTT rodando (ex: ping)
   client.loop();
   
+  // Temporizador não-bloqueante de 1 segundo (1000 ms)
   static unsigned long lastMsg = 0;
   if (millis() - lastMsg > 1000) {
     lastMsg = millis();
     
-    
+    // Só processa e envia se houve leitura de vazão
     if(water > 0){
+      
+      // Região Crítica: Desabilita interrupções para evitar que a ISR altere 'water' 
+      // exatamente no meio da leitura/limpeza (evita "Race Condition")
       noInterrupts();
       doc["pulso"] = water;
-      water = 0;
-      interrupts();
+      water = 0; // Zera o contador para o próximo ciclo
+      interrupts(); // Reabilita as interrupções
+      
+      // Serializa o JSON e publica no tópico
       String payload;
       serializeJson(doc, payload);
-      Serial.println("Enviando Pulsos");
+      
+      Serial.println("Enviando medição de Pulsos:");
       Serial.println(payload);
+      
       client.publish("recanto/vazao", payload.c_str());
     }
-    
   }
 }
