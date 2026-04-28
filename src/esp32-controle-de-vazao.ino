@@ -7,7 +7,18 @@
 #include <WiFi.h>           // Gerencia a conexão Wi-Fi do microcontrolador
 #include <PubSubClient.h>   // Cliente MQTT para publicação e subscrição de tópicos
 #include <ArduinoJson.h>    // Facilita a estruturação do payload no formato JSON
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include "secrets.h"        // Arquivo local com credenciais sensíveis (IMPORTANTE: deve estar no .gitignore)
+
+// ============================================================================
+// Configurações do Display OLED
+// ============================================================================
+#define SCREEN_WIDTH 128 // Largura do display em pixels
+#define SCREEN_HEIGHT 64 // Altura do display em pixels
+#define OLED_RESET    -1 // Pino de reset (ou -1 se compartilhar o reset do Arduino)
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 // ============================================================================
 // Variáveis Globais e Configurações de Rede
@@ -29,6 +40,7 @@ PubSubClient client(espClient); // Lida com o protocolo MQTT sobre o TCP/IP
 
 // Documento JSON alocado dinamicamente para montar o payload de envio
 JsonDocument doc;
+String lastPublishedMsg = "Nenhum envio"; // Armazena o último payload para o display
 
 // ============================================================================
 // Variáveis de Interrupção (Volatile)
@@ -43,6 +55,24 @@ const unsigned long debounceDelay = 200; // Tempo em ms para ignorar ruídos el�
 // ============================================================================
 // Funções Auxiliares
 // ============================================================================
+
+// Atualiza a interface do display OLED
+void atualizarDisplay() {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  
+  display.print("WiFi: ");
+  display.println(WiFi.status() == WL_CONNECTED ? "ON" : "OFF");
+  
+  display.print("MQTT: ");
+  display.println(client.connected() ? "ON" : "OFF");
+  
+  display.println("---------------------");
+  display.println("Ultimo Payload:");
+  display.println(lastPublishedMsg);
+  
+  display.display();
+}
 
 // Inicializa e aguarda a conexão com a rede Wi-Fi
 void setup_wifi() {
@@ -106,6 +136,14 @@ void IRAM_ATTR flow() {
 void setup() {
   Serial.begin(115200);
 
+  // Inicializa o display OLED
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { // Endereço I2C padrão 0x3C
+    Serial.println(F("Falha na alocacao do SSD1306"));
+    for(;;); // Trava se der erro no display
+  }
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+
   // Pré-configura os campos fixos do JSON para economizar processamento no loop
   doc["residencia"] = residencia;
   doc["pulso"] = 0;
@@ -118,7 +156,8 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), flow, FALLING);
   
   setup_wifi();
-  client.setServer(mqtt_server, mqtt_port);
+  client.setServer(mqtt_server, mqtt_port); 
+
 }
 
 // ============================================================================
@@ -155,6 +194,8 @@ void loop() {
       Serial.println(payload);
       
       client.publish("recanto/vazao", payload.c_str());
+      
+      atualizarDisplay();
     }
   }
 }
