@@ -50,7 +50,9 @@ String lastPublishedMsg = "Nenhum envio"; // Armazena o último payload para o d
 
 volatile int water = 0; 
 volatile unsigned long lastInterruptTime = 0;
-const unsigned long debounceDelay = 200; // Tempo em ms para ignorar ruídos elétricos do sensor (debounce)
+const unsigned long debounceDelay = 2; // Tempo em ms para ignorar ruídos elétricos do sensor (debounce)
+// Fator de calibração baseado nos tested do sensor: 760 pulsos = 2L -> 380 pulsos por Litro
+const float PULSOS_POR_LITRO = 380.0;
 
 // ============================================================================
 // Funções Auxiliares
@@ -79,6 +81,11 @@ void setup_wifi() {
   delay(10);
   Serial.println("\nConectando-se ao Wi-Fi...");
 
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.println("Conectando Wi-Fi...");
+  display.display();
+
   WiFi.begin(ssid, password);
   
   // Trava a execução enquanto não conectar
@@ -88,15 +95,15 @@ void setup_wifi() {
   }
   
   Serial.println("\nWiFi conectado com sucesso!");
-  Serial.print("Endereço IP: ");
-  Serial.println(WiFi.localIP());
+  atualizarDisplay();
 }
 
 // Mantém ou recupera a conexão com o broker MQTT
 void reconnect() {
   while (!client.connected()) {
     Serial.print("Tentando conexão com Broker MQTT...");
-    
+    atualizarDisplay();// Mostra que o MQTT caiu
+
     // Gera um ID de cliente único para evitar conflitos no Broker
     String clientId = "ESP32Client-";
     clientId += residencia;
@@ -104,8 +111,7 @@ void reconnect() {
     // Tenta conectar usando as credenciais
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
       Serial.println("Conectado!");
-      // Publica uma mensagem de status informando que o dispositivo "acordou"
-      client.publish("esp32/status", "online");
+      atualizarDisplay(); // Atualiza para MQTT ON
     } else {
       Serial.print("Falhou. Código de erro (rc) = ");
       Serial.print(client.state());
@@ -146,8 +152,7 @@ void setup() {
 
   // Pré-configura os campos fixos do JSON para economizar processamento no loop
   doc["residencia"] = residencia;
-  doc["pulso"] = 0;
-  
+
   // Configura o pino com resistor de pull-up interno (evita flutuação de sinal)
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   
@@ -171,9 +176,9 @@ void loop() {
   // Mantém os processos em background do cliente MQTT rodando (ex: ping)
   client.loop();
   
-  // Temporizador não-bloqueante de 1 segundo (1000 ms)
+  // Temporizador não-bloqueante de 10 segundo (10000 ms)
   static unsigned long lastMsg = 0;
-  if (millis() - lastMsg > 1000) {
+  if (millis() - lastMsg > 10000) {
     lastMsg = millis();
     
     // Só processa e envia se houve leitura de vazão
@@ -182,19 +187,29 @@ void loop() {
       // Região Crítica: Desabilita interrupções para evitar que a ISR altere 'water' 
       // exatamente no meio da leitura/limpeza (evita "Race Condition")
       noInterrupts();
-      doc["pulso"] = water;
+      int pulsosLidos = water;
       water = 0; // Zera o contador para o próximo ciclo
       interrupts(); // Reabilita as interrupções
       
+      // Cálculo de volume com base na sua calibração (380 pulsos/L)
+      float volumeLitros = pulsosLidos / PULSOS_POR_LITRO;
+
+      // Monta o payload padronizado
+      doc["pulsos_intervalo"] = pulsosLidos;
+      doc["volume_litros"] = volumeLitros;
+
       // Serializa o JSON e publica no tópico
       String payload;
       serializeJson(doc, payload);
+
+      lastPublishedMsg = String(volumeLitros, 3) + " L (" + String(pulsosLidos) + "p)";
       
       Serial.println("Enviando medição de Pulsos:");
       Serial.println(payload);
       
       client.publish("recanto/vazao", payload.c_str());
       
+      // Atualiza o display com o novo envio
       atualizarDisplay();
     }
   }
