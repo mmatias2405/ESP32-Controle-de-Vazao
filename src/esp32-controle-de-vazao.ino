@@ -24,7 +24,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 // Variáveis Globais e Configurações de Rede
 // ============================================================================
 
-const char* residencia = "105"; // Identificador único da residência para este dispositivo
+const char* residenciaId = "10"; // Identificador único da residência para este dispositivo
 
 // Credenciais importadas do secrets.h
 const char* ssid = SECRET_SSID;
@@ -106,7 +106,7 @@ void reconnect() {
 
     // Gera um ID de cliente único para evitar conflitos no Broker
     String clientId = "ESP32Client-";
-    clientId += residencia;
+    clientId += residenciaId;
     
     // Tenta conectar usando as credenciais
     if (client.connect(clientId.c_str(), mqtt_user, mqtt_pass)) {
@@ -151,7 +151,7 @@ void setup() {
   display.setTextColor(SSD1306_WHITE);
 
   // Pré-configura os campos fixos do JSON para economizar processamento no loop
-  doc["residencia"] = residencia;
+  doc["residenciaId"] = residenciaId;
 
   // Configura o pino com resistor de pull-up interno (evita flutuação de sinal)
   pinMode(BUTTON_PIN, INPUT_PULLUP);
@@ -195,7 +195,6 @@ void loop() {
       float volumeLitros = pulsosLidos / PULSOS_POR_LITRO;
 
       // Monta o payload padronizado
-      doc["pulsos_intervalo"] = pulsosLidos;
       doc["volume_litros"] = volumeLitros;
 
       // Serializa o JSON e publica no tópico
